@@ -1,0 +1,12 @@
+# Python Virtual Environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Secret keys file
+.env
+
+# Local database file (for development)
+blog.db
