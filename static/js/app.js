@@ -1,13 +1,14 @@
-// Updated app.js with improved error handling, AI generation, User Post Management, Search, Author Pages, Views, Social Sharing, Themes, and Statistics
+// Updated app.js with improved error handling, AI generation (free tier enforcement), User Post Management, Search, Author Pages, Views, Social Sharing, Themes, Statistics, and Landing Page
 
 const AppState = {
-    user: null,
+    user: null, // Now includes: id, username, is_premium, ai_posts_generated_count, free_tier_ai_limit
     posts: [],
     myPosts: [],
-    globalStats: {}, // NEW: For global blog statistics
-    currentView: 'allPosts', // 'allPosts', 'myPosts', 'userPosts', 'singlePost', 'createPost', 'aiGenerate', 'userDashboard'
+    globalStats: {},
+    trendingAiPosts: [],
+    currentView: 'landingPage',
     currentUserId: null,
-    currentTheme: localStorage.getItem('theme') || 'light', // NEW: Store/Load theme preference
+    currentTheme: localStorage.getItem('theme') || 'light',
 };
 
 // Utility function to make API calls with error handling
@@ -28,6 +29,18 @@ async function apiCall(url, method = 'GET', body = null) {
 
         const data = await res.json();
         if (res.ok) {
+            // Special handling for user data updates from auth, or post creation
+            if (url.startsWith('/api/login') || url.startsWith('/api/signup') || url.startsWith('/api/me')) {
+                AppState.user = data; // Data IS the user object
+            } else if (url === '/api/posts' && method === 'POST' && data.user) {
+                AppState.user = { ...AppState.user, ...data.user }; // Merge specific user data returned
+            }
+            // Ensure free_tier_ai_limit is always present for UI checks from user object
+            // This fallback is mostly for old session cookies on first load if they didn't have the field.
+            if (AppState.user && AppState.user.free_tier_ai_limit === undefined) {
+                const updatedUser = await apiCall('/api/me'); // Re-fetch full user object
+                AppState.user = updatedUser || null;
+            }
             return data;
         } else {
             const errorMessage = data.error || 'An unknown error occurred.';
@@ -62,7 +75,6 @@ function renderNavbar() {
     navLinks.innerHTML = '';
     authLinks.innerHTML = '';
 
-    // Theme Toggle Button
     const themeButton = `
         <li class="nav-item ms-lg-3">
             <button class="btn btn-sm btn-outline-light" onclick="toggleTheme()">
@@ -73,15 +85,19 @@ function renderNavbar() {
         </li>
     `;
 
+    // Always show All Posts/Home link
+    navLinks.innerHTML += `<li class="nav-item"><a class="nav-link clickable" onclick="renderPostsList()">All Posts</a></li>`;
+
     if (AppState.user) {
-        navLinks.innerHTML = `
+        navLinks.innerHTML += `
             <li class="nav-item"><a class="nav-link clickable" onclick="renderCreatePostForm()">New Post</a></li>
             <li class="nav-item"><a class="nav-link clickable" onclick="renderMyPostsList()">My Posts</a></li>
-            <li class="nav-item"><a class="nav-link clickable" onclick="renderUserDashboard()">Dashboard</a></li> <!-- NEW Dashboard Link -->
+            <li class="nav-item"><a class="nav-link clickable" onclick="renderUserDashboard()">Dashboard</a></li>
+            <li class="nav-item"><a class="nav-link clickable" onclick="renderPremiumInfoPage()">Premium</a></li>
         `;
         authLinks.innerHTML = `
             ${themeButton}
-            <li class="nav-item"><span class="nav-link">Hi, ${AppState.user.username} ${AppState.user.is_premium ? '<span class="badge bg-warning text-dark ms-1">Premium</span>' : ''}</span></li> <!-- Display Premium Status -->
+            <li class="nav-item"><span class="nav-link">Hi, ${AppState.user.username} ${AppState.user.is_premium ? '<span class="badge bg-warning text-dark ms-1">Premium</span>' : ''}</span></li>
             <li class="nav-item"><a class="nav-link clickable" onclick="logout()">Logout</a></li>
         `;
     } else {
@@ -89,12 +105,12 @@ function renderNavbar() {
             ${themeButton}
             <li class="nav-item"><a class="nav-link clickable" onclick="renderLoginForm()">Login</a></li>
             <li class="nav-item"><a class="nav-link clickable" onclick="renderSignupForm()">Signup</a></li>
+            <li class="nav-item"><a class="nav-link clickable" onclick="renderPremiumInfoPage()">Premium</a></li>
         `;
     }
-    updateThemeIcons(); // Update icons after rendering navbar
+    updateThemeIcons();
 }
 
-// NEW: Theme Toggle Logic
 function toggleTheme() {
     AppState.currentTheme = AppState.currentTheme === 'light' ? 'dark' : 'light';
     localStorage.setItem('theme', AppState.currentTheme);
@@ -104,17 +120,13 @@ function toggleTheme() {
 
 function applyTheme() {
     document.documentElement.setAttribute('data-bs-theme', AppState.currentTheme);
-    // Adjust navbar background for dark mode if needed, or rely on Bootstrap's data-bs-theme
     const navbar = document.getElementById('main-navbar');
     if (AppState.currentTheme === 'dark') {
-        navbar.classList.remove('navbar-dark', 'bg-dark');
-        navbar.classList.add('navbar-dark', 'bg-dark'); // Re-add dark if still default, or add bg-dark for better contrast
-        // If you want actual light navbar in light mode, and dark in dark:
-        // navbar.classList.remove('bg-dark', 'bg-light');
-        // navbar.classList.add(AppState.currentTheme === 'dark' ? 'bg-dark' : 'bg-light');
+        navbar.classList.remove('navbar-light', 'bg-light');
+        navbar.classList.add('navbar-dark', 'bg-dark');
     } else {
-         navbar.classList.remove('navbar-dark', 'bg-dark');
-         navbar.classList.add('navbar-light', 'bg-light');
+        navbar.classList.remove('navbar-dark', 'bg-dark');
+        navbar.classList.add('navbar-light', 'bg-light');
     }
 }
 
@@ -138,13 +150,12 @@ async function renderPostsList(query = '') {
     AppState.currentUserId = null;
     renderLoading();
     try {
-        // Fetch global stats as well
         const [posts, globalStats] = await Promise.all([
             apiCall(`/api/posts${query ? `?query=${encodeURIComponent(query)}` : ''}`),
             apiCall('/api/stats')
         ]);
         AppState.posts = posts;
-        AppState.globalStats = globalStats; // Update global state
+        AppState.globalStats = globalStats;
 
         const container = document.getElementById('app');
         container.innerHTML = `
@@ -155,7 +166,6 @@ async function renderPostsList(query = '') {
                 ${query ? '<button class="btn btn-outline-danger" type="button" onclick="renderPostsList()">Clear Search</button>' : ''}
             </div>
 
-            <!-- Global Stats Display (NEW) -->
             <div class="alert alert-info text-center">
                 <strong>Blog Stats:</strong> Total Users: ${AppState.globalStats.total_users || 0} | Total Posts: ${AppState.globalStats.total_posts || 0} | Total Views: ${AppState.globalStats.total_views || 0}
             </div>
@@ -168,7 +178,7 @@ async function renderPostsList(query = '') {
                         <div class="card post-card">
                             ${post.image_url ? `<img src="${post.image_url}" class="card-img-top post-img">` : ''}
                             <div class="card-body">
-                                <h5 class="card-title">${post.title}</h5>
+                                <h5 class="card-title">${post.title} ${post.is_ai_generated ? '<span class="badge bg-primary ms-1">AI</span>' : ''}</h5>
                                 <p class="card-text">${post.content.replace(/<[^>]*>?/gm, '').slice(0, 100)}...</p>
                                 <p class="card-text text-muted small">
                                     By: <a class="clickable" onclick="renderUserPosts(${post.user_id})">${post.username}</a>
@@ -199,7 +209,7 @@ async function renderSinglePost(id) {
         const post = await apiCall(`/api/posts/${id}`);
         const container = document.getElementById('app');
 
-        const postUrl = window.location.origin; // Current base URL of the SPA
+        const postUrl = window.location.origin;
         const shareText = encodeURIComponent(post.title);
         const shareBody = encodeURIComponent(`${post.title}\n\nRead more at: ${postUrl}`);
 
@@ -207,7 +217,7 @@ async function renderSinglePost(id) {
             <div class="card">
                 ${post.image_url ? `<img src="${post.image_url}" class="card-img-top post-img">` : ''}
                 <div class="card-body">
-                    <h3>${post.title}</h3>
+                    <h3>${post.title} ${post.is_ai_generated ? '<span class="badge bg-primary ms-2">AI Generated</span>' : ''}</h3>
                     <p class="text-muted small">
                         By: <a class="clickable" onclick="renderUserPosts(${post.user_id})">${post.username}</a>
                         <span class="ms-2">Views: ${post.views || 0}</span>
@@ -253,9 +263,21 @@ async function renderSinglePost(id) {
 }
 
 function copyPostLink() {
-    const postUrl = window.location.origin;
-    navigator.clipboard.writeText(postUrl).then(() => {
-        const feedback = document.getElementById('copy-feedback');
+    const feedback = document.getElementById('copy-feedback');
+    if (!navigator.clipboard) {
+        // Fallback for older browsers
+        const dummy = document.createElement('textarea');
+        document.body.appendChild(dummy);
+        dummy.value = window.location.origin;
+        dummy.select();
+        document.execCommand('copy');
+        document.body.removeChild(dummy);
+        feedback.textContent = 'Link copied!';
+        feedback.style.display = 'block';
+        setTimeout(() => feedback.style.display = 'none', 2000);
+        return;
+    }
+    navigator.clipboard.writeText(window.location.origin).then(() => {
         feedback.textContent = 'Link copied!';
         feedback.style.display = 'block';
         setTimeout(() => {
@@ -263,7 +285,6 @@ function copyPostLink() {
         }, 2000);
     }).catch(err => {
         console.error('Failed to copy text: ', err);
-        const feedback = document.getElementById('copy-feedback');
         feedback.textContent = 'Failed to copy link!';
         feedback.style.color = 'red';
         feedback.style.display = 'block';
@@ -276,7 +297,6 @@ function copyPostLink() {
 
 
 // ---------------------- AUTH FORMS ---------------------- //
-// ... (Auth forms remain the same) ...
 
 function renderLoginForm() {
     document.getElementById('app').innerHTML = `
@@ -285,7 +305,7 @@ function renderLoginForm() {
             <input id="login-username" class="form-control mb-2" placeholder="Username">
             <input id="login-password" type="password" class="form-control mb-2" placeholder="Password">
             <button class="btn btn-primary" onclick="login()">Login</button>
-            <button class="btn btn-secondary ms-2" onclick="renderPostsList()">Cancel</button>
+            <button class="btn btn-secondary ms-2" onclick="renderLandingPage()">Cancel</button>
         </div>
     `;
 }
@@ -297,7 +317,7 @@ function renderSignupForm() {
             <input id="signup-username" class="form-control mb-2" placeholder="Username">
             <input id="signup-password" type="password" class="form-control mb-2" placeholder="Password">
             <button class="btn btn-success" onclick="signup()">Create Account</button>
-            <button class="btn btn-secondary ms-2" onclick="renderPostsList()">Cancel</button>
+            <button class="btn btn-secondary ms-2" onclick="renderLandingPage()">Cancel</button>
         </div>
     `;
 }
@@ -307,7 +327,7 @@ async function login() {
     const password = document.getElementById('login-password').value;
     try {
         const res = await apiCall('/api/login', 'POST', { username, password });
-        AppState.user = res;
+        // AppState.user is updated in apiCall hook
         renderNavbar();
         renderPostsList();
     } catch (error) {
@@ -320,7 +340,7 @@ async function signup() {
     const password = document.getElementById('signup-password').value;
     try {
         const res = await apiCall('/api/signup', 'POST', { username, password });
-        AppState.user = res;
+        // AppState.user is updated in apiCall hook
         renderNavbar();
         renderPostsList();
     } catch (error) {
@@ -333,7 +353,7 @@ async function logout() {
         await apiCall('/api/logout');
         AppState.user = null;
         renderNavbar();
-        renderPostsList();
+        renderLandingPage();
     } catch (error) {
         console.error("Logout failed:", error);
     }
@@ -355,10 +375,31 @@ function renderCreatePostForm() {
     AppState.currentView = 'createPost';
     destroyTinymce();
 
+    let aiButtonOrMessage = '';
+    if (AppState.user) {
+        // Ensure free_tier_ai_limit is available, default to 3 if not yet loaded (e.g., old session)
+        const freeTierLimit = AppState.user.free_tier_ai_limit !== undefined ? AppState.user.free_tier_ai_limit : 3;
+        const aiPostsCount = AppState.user.ai_posts_generated_count !== undefined ? AppState.user.ai_posts_generated_count : 0;
+
+        if (AppState.user.is_premium) {
+            aiButtonOrMessage = `<button class="btn btn-info mb-3" onclick="renderAIGenerateForm()">Generate with AI (Unlimited)</button>`;
+        } else {
+            const remaining = freeTierLimit - aiPostsCount;
+            if (remaining > 0) {
+                aiButtonOrMessage = `<button class="btn btn-info mb-3" onclick="renderAIGenerateForm()">Generate with AI (${remaining} posts remaining)</button>`;
+            } else {
+                aiButtonOrMessage = `<p class="text-muted">AI generation limit reached (${freeTierLimit} posts). <a href="#" onclick="renderPremiumInfoPage()">Upgrade to premium</a> for unlimited AI posts.</p>`;
+            }
+        }
+    } else {
+         aiButtonOrMessage = `<p class="text-muted">Login to generate posts with AI (3 free posts!).</p>`;
+    }
+
+
     document.getElementById('app').innerHTML = `
         <div class="form-container">
             <h3>New Blog Post</h3>
-            ${AppState.user && AppState.user.is_premium ? `<button class="btn btn-info mb-3" onclick="renderAIGenerateForm()">Generate with AI</button>` : AppState.user ? '<p class="text-muted">AI generation is a <a href="#" onclick="renderUserDashboard()">premium feature</a>.</p>' : ''} <!-- Premium Check -->
+            ${aiButtonOrMessage}
             <input id="post-title" class="form-control mb-2" placeholder="Post Title" value="${aiGeneratedDraft.title || ''}">
             <input id="post-image" class="form-control mb-2" placeholder="Image URL (optional)" value="${aiGeneratedDraft.image_url || ''}">
             <textarea id="post-content" class="form-control mb-2" rows="8" placeholder="Write your content here..."></textarea>
@@ -457,8 +498,11 @@ async function createPost() {
         return;
     }
 
+    const is_ai_generated = aiGeneratedDraft.title ? true : false;
+
     try {
-        await apiCall('/api/posts', 'POST', { title, content, image_url });
+        const response = await apiCall('/api/posts', 'POST', { title, content, image_url, is_ai_generated });
+        // AppState.user is updated by apiCall hook for `data.user`
         destroyTinymce();
         renderPostsList();
     } catch (error) {
@@ -514,17 +558,24 @@ function renderAIGenerateForm() {
     AppState.currentView = 'aiGenerate';
     destroyTinymce();
 
-    // Check premium status before rendering AI form
-    if (!AppState.user || !AppState.user.is_premium) {
-        alert("AI post generation is a premium feature. Please upgrade your account.");
-        renderUserDashboard(); // Redirect to dashboard or premium info page
+    // Ensure AppState.user and its properties are available
+    // Default to 0/3 if properties are undefined (e.g., from an old session cookie)
+    const freeTierLimit = AppState.user.free_tier_ai_limit !== undefined ? AppState.user.free_tier_ai_limit : 3;
+    const aiPostsCount = AppState.user.ai_posts_generated_count !== undefined ? AppState.user.ai_posts_generated_count : 0;
+
+    // Check premium status OR free tier limit from latest AppState.user
+    if (!AppState.user || (!AppState.user.is_premium && aiPostsCount >= freeTierLimit)) {
+        alert("AI post generation limit reached. Please upgrade your account to premium for unlimited access.");
+        renderUserDashboard(); // Redirect to dashboard if limit reached
         return;
     }
+
+    const remaining = AppState.user.is_premium ? 'Unlimited' : `${freeTierLimit - aiPostsCount} remaining`;
 
     document.getElementById('app').innerHTML = `
         <div class="form-container">
             <h3>Generate Blog Post with AI</h3>
-            <p class="text-muted">Enter a brief prompt describing what you want your blog post to be about. E.g., "The benefits of meditation for daily stress relief."</p>
+            <p class="text-muted">You have ${remaining} AI posts available.</p>
             <textarea id="ai-prompt" class="form-control mb-2" rows="4" placeholder="Enter your prompt here..."></textarea>
             <button class="btn btn-success" onclick="generatePostWithAI()">Generate</button>
             <button class="btn btn-secondary ms-2" onclick="renderCreatePostForm()">Back to New Post</button>
@@ -544,19 +595,33 @@ async function generatePostWithAI() {
     try {
         const response = await apiCall('/api/generate_ai_post', 'POST', { prompt });
         if (response.error) {
-            renderAIGenerateForm();
+            // Error is handled by apiCall, but return to form
+            // Special handling for "limit reached" error message
+            if (response.error.includes('limit reached')) {
+                 document.getElementById('app').innerHTML = `
+                    <div class="form-container">
+                        <p class="text-danger text-center">AI post generation limit reached. Please <a href="#" onclick="renderPremiumInfoPage()">upgrade to premium</a>.</p>
+                        <button class="btn btn-secondary mt-3" onclick="renderCreatePostForm()">Manual Post</button>
+                    </div>
+                `;
+            } else {
+                renderAIGenerateForm(); // For other types of AI generation errors
+            }
             return;
         }
 
         aiGeneratedDraft = {
             title: response.title,
             content: response.content,
-            image_url: response.image_url
+            image_url: response.image_url,
+            is_ai_generated: true
         };
         renderCreatePostForm();
 
     } catch (error) {
         console.error("AI Post Generation failed:", error);
+        // This catch block handles network errors or errors not returning JSON.
+        // The `apiCall` function will already show a generic alert.
         document.getElementById('app').innerHTML = `
             <div class="form-container">
                 <p class="text-danger text-center">Failed to generate AI content. Please try again or with a different prompt.</p>
@@ -568,7 +633,6 @@ async function generatePostWithAI() {
 }
 
 // ---------------------- MY POSTS SECTION ---------------------- //
-// ... (My Posts List remains the same) ...
 
 async function renderMyPostsList() {
     AppState.currentView = 'myPosts';
@@ -597,7 +661,7 @@ async function renderMyPostsList() {
                         <div class="card post-card">
                             ${post.image_url ? `<img src="${post.image_url}" class="card-img-top post-img">` : ''}
                             <div class="card-body">
-                                <h5 class="card-title">${post.title}</h5>
+                                <h5 class="card-title">${post.title} ${post.is_ai_generated ? '<span class="badge bg-primary ms-1">AI</span>' : ''}</h5>
                                 <p class="card-text">${post.content.replace(/<[^>]*>?/gm, '').slice(0, 100)}...</p>
                                 <p class="card-text text-muted small">By: <a class="clickable" onclick="renderUserPosts(${post.user_id})">${post.username}</a>
                                 <span class="ms-2">Views: ${post.views || 0}</span>
@@ -620,7 +684,6 @@ async function renderMyPostsList() {
 
 
 // ---------------------- USER'S PUBLIC POSTS PAGE ---------------------- //
-// ... (User's Public Posts Page remains the same) ...
 
 async function renderUserPosts(userId, query = '') {
     AppState.currentView = 'userPosts';
@@ -650,7 +713,7 @@ async function renderUserPosts(userId, query = '') {
                         <div class="card post-card">
                             ${post.image_url ? `<img src="${post.image_url}" class="card-img-top post-img">` : ''}
                             <div class="card-body">
-                                <h5 class="card-title">${post.title}</h5>
+                                <h5 class="card-title">${post.title} ${post.is_ai_generated ? '<span class="badge bg-primary ms-1">AI</span>' : ''}</h5>
                                 <p class="card-text">${post.content.replace(/<[^>]*>?/gm, '').slice(0, 100)}...</p>
                                 <p class="card-text text-muted small">By: ${post.username}
                                 <span class="ms-2">Views: ${post.views || 0}</span>
@@ -673,14 +736,14 @@ function searchUserPosts(userId) {
 }
 
 
-// ---------------------- NEW: USER DASHBOARD / SETTINGS ---------------------- //
+// ---------------------- USER DASHBOARD / SETTINGS ---------------------- //
 
 async function renderUserDashboard() {
     AppState.currentView = 'userDashboard';
     renderLoading();
     try {
         const userStats = await apiCall('/api/me/stats');
-        AppState.user = { ...AppState.user, ...userStats }; // Update user object with latest stats/premium status
+        AppState.user = { ...AppState.user, ...userStats }; // Update AppState.user with latest stats/premium status
 
         const container = document.getElementById('app');
         container.innerHTML = `
@@ -695,8 +758,9 @@ async function renderUserDashboard() {
                                 <h5 class="card-title">Account Status</h5>
                                 <p class="card-text">Status: ${AppState.user.is_premium ? '<span class="badge bg-warning text-dark">Premium</span>' : '<span class="badge bg-secondary">Free</span>'}</p>
                                 ${!AppState.user.is_premium ? `
-                                    <button class="btn btn-success mt-2" onclick="goPremium()">Go Premium!</button>
-                                    <p class="mt-2 text-muted small">Unlock AI generation, advanced features, and more.</p>
+                                    <button class="btn btn-success mt-2" onclick="renderPremiumInfoPage()">Go Premium!</button>
+                                    <p class="mt-2 text-muted small">AI Posts Used: ${AppState.user.ai_posts_generated_count || 0} / ${AppState.user.free_tier_ai_limit || 0}</p>
+                                    <p class="mt-2 text-muted small">Unlock unlimited AI generation, advanced features, and more.</p>
                                 ` : `
                                     <p class="mt-2 text-muted small">Thank you for being a premium member! Enjoy exclusive features.</p>
                                 `}
@@ -720,7 +784,6 @@ async function renderUserDashboard() {
                 <div class="row">
                     <div class="col-md-6">
                         <p>Username: <strong>${AppState.user.username}</strong></p>
-                        <!-- Future: Add options to change username/password here -->
                     </div>
                     <div class="col-md-6">
                         <h5 class="mb-2">Theme Preference:</h5>
@@ -735,12 +798,11 @@ async function renderUserDashboard() {
                 <button class="btn btn-secondary mt-4" onclick="renderPostsList()">← Back to Posts</button>
             </div>
         `;
-        updateThemeIcons(); // Apply correct icons after rendering dashboard
+        updateThemeIcons();
         document.getElementById('current-theme-text').textContent = AppState.currentTheme === 'light' ? 'Light' : 'Dark';
 
     } catch (error) {
         console.error("Failed to render user dashboard:", error);
-        // If error is unauthorized, redirect to login
         if (error.message && error.message.includes('Unauthorized')) {
              alert('Please log in to view your dashboard.');
              renderLoginForm();
@@ -750,15 +812,12 @@ async function renderUserDashboard() {
     }
 }
 
-// NEW: Function to initiate premium checkout
 async function goPremium() {
     try {
         const response = await apiCall('/api/fastspring/checkout', 'POST');
         if (response.checkout_url) {
-            window.open(response.checkout_url, '_blank'); // Open FastSpring checkout in new tab
-            alert("Redirecting to FastSpring checkout. Please complete your purchase there.");
-            // You might want to periodically check backend or refresh dashboard after some time
-            // to see if premium status has updated via webhook.
+            window.open(response.checkout_url, '_blank');
+            alert("Redirecting to FastSpring checkout. Please complete your purchase there. Your premium status will update automatically upon successful payment.");
         } else {
             alert("Failed to get checkout URL. Please try again.");
         }
@@ -768,20 +827,155 @@ async function goPremium() {
     }
 }
 
+// ---------------------- Premium Information Page ---------------------- //
+
+function renderPremiumInfoPage() {
+    AppState.currentView = 'premiumInfo';
+    const container = document.getElementById('app');
+    container.innerHTML = `
+        <div class="form-container text-center">
+            <h2 class="mb-4">Go Premium with AI Blogify!</h2>
+            <p class="lead">Unlock the full potential of AI content generation and exclusive features.</p>
+
+            <div class="row justify-content-center mt-5">
+                <div class="col-md-8">
+                    <div class="card text-center bg-info text-white">
+                        <div class="card-header">
+                            <h3>Premium Plan</h3>
+                        </div>
+                        <div class="card-body">
+                            <h1 class="card-title pricing-card-title">$9.99<small class="text-muted">/month</small></h1>
+                            <ul class="list-unstyled mt-3 mb-4">
+                                <li><strong>Unlimited</strong> AI Post Generation</li>
+                                <li>Access to all future premium features</li>
+                                <li>Priority Support</li>
+                                <li>Ad-Free Experience (Future)</li>
+                                <li>Advanced Analytics (Future)</li>
+                            </ul>
+                            ${AppState.user ? (AppState.user.is_premium ? 
+                                `<button class="btn btn-lg btn-secondary" disabled>You are already Premium!</button>` :
+                                `<button class="btn btn-lg btn-success" onclick="goPremium()">Upgrade Now!</button>`) :
+                                `<button class="btn btn-lg btn-success" onclick="renderSignupForm()">Sign Up & Go Premium!</button>`
+                            }
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <p class="mt-5 text-muted">For a limited time, enjoy ${AppState.user ? AppState.user.free_tier_ai_limit || 0 : '3'} AI-generated posts on our free tier. Upgrade for endless possibilities!</p>
+            <button class="btn btn-secondary mt-4" onclick="renderPostsList()">← Back to All Posts</button>
+        </div>
+    `;
+}
+
+
+// ---------------------- Landing Page ---------------------- //
+
+async function renderLandingPage() {
+    AppState.currentView = 'landingPage';
+    renderLoading();
+    try {
+        const [globalStats, trendingAiPosts] = await Promise.all([
+            apiCall('/api/stats'),
+            apiCall('/api/trending_ai_posts')
+        ]);
+        AppState.globalStats = globalStats;
+        AppState.trendingAiPosts = trendingAiPosts;
+
+        const container = document.getElementById('app');
+        container.innerHTML = `
+            <!-- Hero Section -->
+            <div class="hero-section mb-5">
+                <div class="container">
+                    <h1>AI Blogify: Your Daily Dose of AI-Generated Insights</h1>
+                    <p class="lead">Harness the power of AI to explore trending topics, get concise summaries, and dive deep into various categories. Fresh content, every day!</p>
+                    ${AppState.user ? `
+                        <button class="btn btn-primary btn-lg me-3" onclick="renderPostsList()">View All Posts</button>
+                        <button class="btn btn-outline-light btn-lg" onclick="renderCreatePostForm()">Create Your Own</button>
+                    ` : `
+                        <button class="btn btn-primary btn-lg me-3" onclick="renderSignupForm()">Get Started - It's Free!</button>
+                        <button class="btn btn-outline-light btn-lg" onclick="renderLoginForm()">Login</button>
+                    `}
+                </div>
+            </div>
+
+            <!-- Global Stats Section -->
+            <div class="container my-5 text-center">
+                <h2>Our Impact</h2>
+                <div class="row justify-content-center mt-4">
+                    <div class="col-md-4">
+                        <div class="card bg-info text-white p-3">
+                            <div class="card-body">
+                                <h3 class="card-title">${AppState.globalStats.total_users || 0}</h3>
+                                <p class="card-text">Total Users</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card bg-success text-white p-3">
+                            <div class="card-body">
+                                <h3 class="card-title">${AppState.globalStats.total_posts || 0}</h3>
+                                <p class="card-text">Total Posts Generated</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card bg-warning text-dark p-3">
+                            <div class="card-body">
+                                <h3 class="card-title">${AppState.globalStats.total_views || 0}</h3>
+                                <p class="card-text">Total Views Across Blog</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Latest Trending AI Posts Section -->
+            <div class="container my-5">
+                <h2 class="text-center mb-4">Latest Trending AI Posts</h2>
+                ${AppState.trendingAiPosts.length === 0 ? `<p class="text-center">No AI-generated posts available yet. Check back soon!</p>` : ''}
+                <div class="row">
+                    ${AppState.trendingAiPosts.map(post => `
+                        <div class="col-md-4 mb-4">
+                            <div class="card post-card">
+                                ${post.image_url ? `<img src="${post.image_url}" class="card-img-top post-img">` : ''}
+                                <div class="card-body">
+                                    <h5 class="card-title">${post.title}</h5>
+                                    <p class="card-text">${post.content.replace(/<[^>]*>?/gm, '').slice(0, 100)}...</p>
+                                    <p class="card-text text-muted small">
+                                        By: <a class="clickable" onclick="renderUserPosts(${post.user_id})">${post.username}</a>
+                                        <span class="ms-2">Views: ${post.views || 0}</span>
+                                    </p>
+                                    <a class="btn btn-sm btn-outline-primary" onclick="renderSinglePost(${post.id})">Read More</a>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+                <div class="text-center mt-4">
+                    <button class="btn btn-lg btn-secondary" onclick="renderPostsList()">Explore All Blog Posts →</button>
+                </div>
+            </div>
+        `;
+    } catch (error) {
+        console.error("Failed to render landing page:", error);
+    }
+}
+
 
 // ---------------------- INITIALIZATION ---------------------- //
 
 async function initializeApp() {
-    applyTheme(); // Apply theme preference immediately
+    applyTheme();
     renderLoading();
     try {
         const user = await apiCall('/api/me');
-        AppState.user = user;
         renderNavbar();
-        await renderPostsList();
+        await renderLandingPage();
     } catch (error) {
         console.error("Initialization failed:", error);
         renderNavbar();
+        await renderLandingPage();
     }
 }
 
