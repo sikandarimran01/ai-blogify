@@ -8,3 +8,4 @@ openai
 gunicorn
 psycopg2-binary
 APScheduler
+pip freeze > requirements.txt
